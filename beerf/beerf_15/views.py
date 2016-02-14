@@ -9,10 +9,10 @@ from django.utils.decorators import decorator_from_middleware
 from beerf_15.models import *
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from beerf_algo.beerf_algo import dummy_algo
+from beerf_algo.beerf_algo import algo
 from utilities import money
 from utilities import inventory
-
+import random
 '''
 INITIAL FUNCTIONS
 1. /register
@@ -22,14 +22,10 @@ INITIAL FUNCTIONS
 '''
 
 def register(request):
-	if 'user_id' in request.session:
-		return redirect(beerf_15.views.home)
 	if request.method == 'POST':
 		form = userForm(request.POST)
 		if form.is_valid():
 			new_user = form.save()
-			stat = status(pid = new_user,turn = 1,stage=0)
-			stat.save()
 			request.session["user_id"] = new_user.pid
 			return redirect(beerf_15.views.home)
 	else:
@@ -37,8 +33,6 @@ def register(request):
 		return render(request, "register.html", {"form" : form})
 	
 def login(request,error=''):
-	if 'user_id' in request.session:
-		return redirect(beerf_15.views.home)
 	if request.method == 'POST':
 		email = request.POST.get('email')
 		try:
@@ -55,17 +49,20 @@ def login(request,error=''):
 		form = userLoginForm()
 		return render(request, "login.html", {"form" : form,"error" : error})
 
-@decorator_from_middleware(middleware.UserAuth)
+@decorator_from_middleware(middleware.loggedIn)
 def home(request):
 	id = request.session["user_id"]
-	user = users.objects.get(pid = id)
-	return render(request, "home.html",{ "name" : user.name })
+	user  = users.objects.get(pk=id)
+	#if (user.factory_id):
+		#return redirect(beerf_15.views.testhome)
+	#else:
+	return render(request, "home.html", {"name" : user.name})
 
-@decorator_from_middleware(middleware.UserAuth)
+@decorator_from_middleware(middleware.loggedIn)
 def logout(request):
 	request.session.flush()
 	form = userLoginForm()
-	return render(request, "login.html", {"form" : form,"error" : "logged out"})
+	return render(request, "login.html", {"form" : form,"error" : "Successfully logged out"})
 
 
 '''
@@ -97,13 +94,74 @@ def get_sp_details():
 def unlocked_ret(frids, fid):
 	rids = factory_retailer.objects.filter(frid__in = frids).values_list('rid_id', flat = True)
 	unlocked_rids = retailers.objects.filter(rid__in = rids , unlocked = 1).values_list('rid', flat = True)
-	#unlocked_rids = retailers.objects.filter(rid__in = rids).values_list('rid', flat = True)
 	unlocked_frids = factory_retailer.objects.filter(rid_id__in = unlocked_rids, fid_id = fid).values_list('frid',flat = True)
 	return unlocked_frids
 
 def calculate_popularity(retailer_no):
 	pops = [0.7,0.5,0.4,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5];
 	return pops[retailer_no]
+
+#@csrf_exempt
+#@decorator_from_middleware(middleware.SessionPIDAuth)
+def unlockRetailers(id,turn,stage):
+	#if request.method == 'POST':
+		#id = request.POST.get("user_id")
+	try:
+		user  = users.objects.get(pk=id)
+	except users.DoesNotExist:
+		return 103 #return JsonResponse({"status":"103", "data":{"description":"Failed! User does not exist"}})
+		user = None
+	if id and user:
+			#turn = request.POST.get("turn")
+			#stage = request.POST.get("stage")			
+		if(not (turn) or not (stage)):
+			return 104 #return JsonResponse({"status":"104", "data":{"description":"Invalid request parameters. user_id,turn and stage should be provided."}})
+		else:
+			stat = status.objects.get(pid = id)
+			if((turn != str(stat.turn)) or (stage != str(stat.stage)) or stage !="3"):
+				return 105 #return JsonResponse({"status":"105", "data":{"description":"Turn or Stage mismatch"}})
+			if(int(turn) % 5 != 0):
+					return 106 #return JsonResponse({"status":"106", "data":{"description":"Invalid Turn."}})
+			else:
+				factory = user.factory
+				zone = int(turn)/5 +1
+				rids = factory_retailer.objects.filter(fid = factory).values_list('rid_id', flat = True)
+				rets = retailers.objects.filter(rid__in = rids, zone = zone)
+				for ret in rets:
+					ret.unlocked = 1
+					ret.save()
+				return 200 #return JsonResponse({"status":"200", "data":{"description":"success.retailers unlocked."}})
+	#else:
+		#return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
+
+#@csrf_exempt
+#@decorator_from_middleware(middleware.SessionPIDAuth))	
+def updateInventory(id,turn,stage):
+	
+	#if request.method == 'POST':
+		#id = request.POST.get("user_id")
+	try:
+		user  = users.objects.get(pk=id)
+		
+	except users.DoesNotExist:
+		return JsonResponse({"status":"103", "data":{"description":"Failed! User does not exist"}})
+		user = None
+	if id and user:
+			#turn = request.POST.get("turn")
+			#stage = request.POST.get("stage")			
+		if(not (turn) or not (stage)):
+			return 104 #return JsonResponse({"status":"104", "data":{"description":"Invalid request parameters. user_id,turn and stage should be provided."}})
+		else:
+			stat = status.objects.get(pid = id)
+			if((turn != str(stat.turn)) or (stage != str(stat.stage)) or stage !="3"):
+				return 105 #return JsonResponse({"status":"105", "data":{"description":"Turn or Stage mismatch"}})
+			else:
+				factory = user.factory
+				order = factory_order.objects.get(fid_id = factory.fid, turn = turn)
+				inventory.increase(factory.fid, order.quantity, int(turn))
+				return 200 #return JsonResponse({"status":"200", "data":{"description":"success.Inventory updated."}})
+	#else:
+		#return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
 
 
 '''
@@ -116,19 +174,25 @@ ALLOCATION
 #creates a retailer for factory fac1 and its opponent factory
 def retailer_allocate(fac1, zone, unlocked, retailer_no):
 	#create the retailer
-	ret = retailers(zone = zone, unlocked=unlocked)
+	rcodes = ['a','b','c','d','e','f','g','h','i','j','k','l','m','n','o']
+	retDetails = ['a','b','c','d','e','f','g','h','i','j','k','l','m','n','o']
+	initial_demands = [[70,75,80][random.randint(0,2)] for i in range(2)]
+	ret = retailers(rcode = rcodes[retailer_no], zone = zone, details = retDetails[retailer_no], unlocked=unlocked)
 	ret.save()
 
 	fac_fac_relation = factory_factory.objects.get(fac1=fac1)
 	fac2 = fac_fac_relation.fac2
 
-	pop = calculate_popularity(retailer_no)
 	#create the factory-retailer link
-	fac_ret_relation = factory_retailer(fid = fac1, rid = ret, popularity = pop)
+	fac_ret_relation = factory_retailer(fid = fac1, rid = ret, popularity = 1)
 	fac_ret_relation.save()
-
-	fac_ret_relation = factory_retailer(fid = fac2, rid = ret, popularity = 1-pop)
+	demand_turn = (zone-1)*5
+	user_demand = fac_ret_demand(frid=fac_ret_relation,turn=demand_turn,quantity = initial_demands[0])
+	user_demand.save()
+	fac_ret_relation = factory_retailer(fid = fac2, rid = ret, popularity = 1)
 	fac_ret_relation.save()
+	opponent_demand = fac_ret_demand(frid=fac_ret_relation,turn=demand_turn,quantity = initial_demands[1])
+	opponent_demand.save()
 
 @csrf_exempt
 @decorator_from_middleware(middleware.SessionPIDAuth)
@@ -171,6 +235,7 @@ def assign(request):
 					else:
 						retailer_allocate(fac1, zone, 0, (zone-1)*3+i)
 
+
 			return JsonResponse({"status":"200","data":{"description":"Successfully allocated Factories and Retailers"}})
 		else:
 			#The facrtory has been set already
@@ -187,6 +252,8 @@ ANY TIME FUNCTIONS
 3. map
 4. getPopularity
 5. restart
+6. history
+7. getCapacityDetails
 '''
 
 @csrf_exempt
@@ -274,18 +341,21 @@ def map(request):
 			retailers1 = factory_retailer.objects.filter(fid_id=user.factory_id)
 			rcode = []
 			zone = []
+			popularity = []
 			unlocked = []
 			for retailer in retailers1:
 				retailer_details = retailers.objects.get(pk=retailer.rid_id)
 				rcode.append(retailer_details.rcode)
 				zone.append(retailer_details.zone)
 				unlocked.append(retailer_details.unlocked)
+				popularity.append(retailer.popularity)
 			
 			json={}
 			json["status"] = "200"
 			data = {}
 			data["fcode"] = fcode
 			data["rcode"] = rcode
+			data["popularity"] = popularity
 			json["data"] = data
 			json["zone"] = zone
 			json["unlocked"] = unlocked
@@ -373,10 +443,107 @@ def restart(request):
 			capacity.objects.filter(Q(fid=fid)|Q(fid=opp_fid)).delete()
 			money_log.objects.filter(Q(fid=fid)|Q(fid=opp_fid)).delete()
 			inventory_log.objects.filter(Q(fid=fid)|Q(fid=opp_fid)).delete()
-			
+			score.objects.filter(pid = user).delete()
 			return JsonResponse({"status":"200", "data":{"description":"Success!"}})
 	else:
 		return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
+
+@csrf_exempt
+@decorator_from_middleware(middleware.SessionPIDAuth)
+def history(request):
+	'''
+		Returns the user's game moves history by retrieving all his data from the DB.
+		Retrieves from:
+			* fac_ret_demand
+			* fac_ret_supply
+			* factory_order
+		Returns as:
+		history = 
+		{
+			'status':'200',
+			'data': {
+				#turn_no_1 : {
+					'supply':
+					'demand':
+					'order':
+				}
+				#turn_no_2:{
+				....
+				...
+				}
+				...
+				..
+			}
+		}
+	'''
+	if request.method == 'POST':
+		id = request.POST.get("user_id")
+		try:
+			user = users.objects.get(pk=id)
+		except users.DoesNotExist:
+			return JsonResponse({"status":"103", "data":{"description":"Failed! User does not exist"}})
+			user = None
+		
+		# after all verification is done.
+		if id and user:
+			fid = user.factory
+			history = dict()
+			frids = [f.frid for f in factory_retailer.objects.filter(fid=fid)]
+			unlocked_frids = unlocked_ret(frids, fid)
+			fac_ret_demands = [fac_ret_demand.objects.filter(frid=frid) for frid in unlocked_frids]
+			# fac_ret_demands.reverse()
+			for fac_ret in fac_ret_demands:
+				for demand in fac_ret:
+					zone = int(demand.frid.rid.zone)
+					turn = int(demand.turn)
+					print turn
+					if turn > (zone-1)*5:
+						quantity = int(demand.quantity)
+						if turn not in history:
+							history[turn] = dict()
+							history[turn]['demand'] = []
+							history[turn]['supply'] = []
+						history[turn]['demand'].append(quantity)
+			fac_ret_supplies = [fac_ret_supply.objects.filter(frid=frid) for frid in unlocked_frids]
+			for fac_ret in fac_ret_supplies:
+				for supply in fac_ret:
+					zone = int(demand.frid.rid.zone)
+					turn = int(demand.turn)
+					if turn > (zone-1)*5:
+						quantity = int(supply.quantity)
+						history[turn]['supply'].append(quantity)
+			factory_orders = factory_order.objects.filter(fid=fid)
+			for order in factory_orders:
+				turn = int(order.turn)
+				history[turn]['order'] = int(order.quantity)
+
+			
+			return JsonResponse({"status":"200", "data":{"description":"Success","history":history}})
+	else:
+		return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
+
+@csrf_exempt
+@decorator_from_middleware(middleware.SessionPIDAuth)
+def getCapacityDetails(request):
+	id = request.POST.get("user_id")
+	try:
+		user = users.objects.get(pk=id)
+	except users.DoesNotExist:
+		return JsonResponse({"status":"103", "data":{"description":"Failed! User does not exist"}})
+		user = None
+	if id and user:
+		stat = status.objects.get(pid = id)
+		cur_capacity = capacity.objects.get(fid = user.factory, turn = stat.turn).capacity
+		next_upgrade_capacity = calculate_next_capacity(cur_capacity)
+		upgrade_cost = calculate_money(cur_capacity)
+		json = {}
+		json["status"] = 200
+		data = {}
+		data["current_capacity"] = cur_capacity
+		data["next_upgrade_capacity"] = next_upgrade_capacity
+		data["upgrade_cost"] = upgrade_cost
+		json["data"] = data
+		return JsonResponse(json)
 
 '''
 TURN & STAGE BASED OPERATIONS
@@ -387,7 +554,7 @@ TURN & STAGE BASED OPERATIONS
 4. viewDemandSupply (Turn, Stage = 2)
 5. placeOrder(Turn, Stage = 2)
 6. update_selling_price(Turn, Stage=)
-7. updateValues(Turn, stage = 3)
+7. updateCapacity(Turn, stage = 3)
 
 
 '''
@@ -420,7 +587,7 @@ def get_demand(request):
 					demand = []
 					#get the demand from the algo foreach retailer
 					for frid in unlocked_frids:
-						retailer_demand = dummy_algo.calculate_demand(frid,turn)
+						retailer_demand = algo.calculate_demand(frid,turn)
 						demand.append(retailer_demand)
 						fac_ret = factory_retailer.objects.get(pk=frid)
 						fr_demand = fac_ret_demand( frid = fac_ret, turn = turn,quantity = retailer_demand)
@@ -512,7 +679,10 @@ def supply(request):
 				 	
 				 	if quantity_sum > factory.inventory:
 				 		return JsonResponse({"status":"107", "data":{"description":"Invalid Quantity. supply must be less than inventory"}})
-				 		
+				 	inventoryCost = (factory.inventory - quantity_sum )* 2
+				 	cur_money = (quantity_sum * 50) + factory.money
+				 	if inventoryCost > cur_money:
+				 		return JsonResponse({"status":"102", "data":{"description":"Invalid Quantity. Insufficient money to bear Inventory cost, Increase Supply amount. "}})	
 					frids = factory_retailer.objects.filter(fid = factory).values_list('frid', flat = True)
 					unlocked_frids = unlocked_ret(frids, user.factory_id)
 					demands = fac_ret_demand.objects.filter(frid_id__in = unlocked_frids, turn = stat.turn)
@@ -530,9 +700,10 @@ def supply(request):
 					 		supply_value = fac_ret_supply(turn = int(turn), quantity = int(quantity1[i]), frid_id = demand.frid_id )
 					 		supply_value.save()
 					 		i=i+1
-						dummy_algo.calculate_supply(factory.fid,int(turn))
+						algo.calculate_supply(factory.fid,int(turn))
 						money.moneySupply(factory.fid, quantity_sum, int(turn))
 						inventory.decrease(factory.fid, quantity_sum, int(turn))
+						money.moneyInventory(factory.fid, factory.inventory-quantity_sum, int(turn))
 						stat.stage = stat.stage+1
 						stat.save()
 						return JsonResponse({"status":"200", "data":{"description":"Success"}})
@@ -566,6 +737,7 @@ def viewDemandSupply(request):
 					data={}
 					demand = []
 					supply = []
+					frids = unlocked_ret(frids,factory)
 					for frid in frids:
 						fac_ret = factory_retailer.objects.get(pk=frid)
 						fr_demand = fac_ret_demand.objects.get(frid=fac_ret, turn=turn)
@@ -619,16 +791,29 @@ def placeOrder(request):
 			# create the new order in the DB
 			new_order = factory_order(fid=factory,turn=turn,quantity=quantity)
 			new_order.save()
-			money.moneyPlaceOrder(factory.fid, quantity, int(turn))
-			inventory.increase(factory.fid, quantity, int(turn))
+			try:
+				money.moneyPlaceOrder(factory.fid, quantity, int(turn))
+				#calculate the order of the simulated factory
+				algo.calculate_order(factory,int(turn))
+			except ValueError as err:
+				new_order.delete()
+				return JsonResponse({"status":"111","data":{"description":str(err)}})
 			#calculate the order of the simulated factory
-			dummy_algo.calculate_order(factory,int(turn))
 			# move to next stage of the current turn
-			cur_status.turn=turn+1
-			cur_status.stage = 0
+			
+			cur_status.stage = stage+1
 			cur_status.save()
-			cap = capacity(turn = cur_status.turn,capacity=cur_capacity,fid=factory)
-			cap.save()
+
+			result1 = updateInventory(str(id), str(turn), str(3))
+			result2 = 200
+			if int(turn) % 5 == 0 :
+				result2 =unlockRetailers(str(id), str(turn), str(3))
+			if result1 == 200 and result2 == 200:
+				cur_status.turn=turn
+				cur_status.stage = 3
+				cur_status.save()
+	
+			
 			return JsonResponse({"status":"200","data":{"description":"Successfully placed the order"}})
 
 	
@@ -683,12 +868,20 @@ def updateSellingPrice(request):
 	else:
 		return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
 
+def calculate_next_capacity(cap):
+	cap_array = [200, 400, 700, 1000, 1400, 1800, 2300];
+	cap_index = cap_array.index(cap)
+	return cap_array[cap_index + 1]
 
+def calculate_money(cap):
+	cap_array = [200, 400, 700, 1000, 1400, 1800, 2300];
+	cap_index = cap_array.index(cap)
+	cap_money = [2000, 8000, 12000, 18000, 18000, 18000, 18000];
+	return cap_money[cap_index + 1]
 
 @csrf_exempt
 @decorator_from_middleware(middleware.SessionPIDAuth)
-def updateValues(request):
-	
+def updateCapacity(request):
 	if request.method == 'POST':
 		id = request.POST.get("user_id")
 		try:
@@ -700,7 +893,6 @@ def updateValues(request):
 		if id and user:
 			turn = request.POST.get("turn")
 			stage = request.POST.get("stage")
-			
 			if(not (stage) or not (turn)):
 				return JsonResponse({"status":"104", "data":{"description":"Invalid request parameters. user_id,turn and stage should be provided."}})
 			else:
@@ -708,19 +900,27 @@ def updateValues(request):
 				if((turn != str(stat.turn)) or (stage != str(stat.stage)) or stage !="3"):
 					return JsonResponse({"status":"105", "data":{"description":"Turn or Stage mismatch."}})
 				else:
-					updates = request.POST.get("values").split(',')
-					for u in updates:
-				 		if not(u.isdigit()):
-				 			return JsonResponse({"status":"106", "data":{"description":"Invalid value. It must be an integer"}})
+					flag = request.POST.get("flag")
+					cap_old = capacity.objects.get(turn = int(turn), fid_id = user.factory_id).capacity
+					if(int(flag)==1):
+						cost = calculate_money(cap_old)
+						cur_money = money.getMoney(user.factory_id)
+						if(cur_money < cost):
+							return JsonResponse({"status":"106", "data":{"description":"Not enough money for upgrade!"}})
 
-															 		
-					new_capacity = capacity(turn = int(turn), capacity = int(updates[0]) , fid_id = user.factory_id)
-					new_capacity.save()
-	
-					stat.stage = stat.stage+1
+						cap = capacity(turn = int(turn)+1 , fid_id = user.factory_id)
+						cap.capacity = calculate_next_capacity(cap_old)
+						cap.save()
+						money.moneyDecrease(user.factory_id, cost, int(turn))
+					else:
+						cap = capacity(turn = int(turn)+1,capacity=cap_old,fid_id=user.factory_id)
+						cap.save()
+					algo.calculate_capacity_upgrade(user.factory_id, int(turn))
+					algo.calculate_score(user.factory,int(turn))
+					stat.turn = int(turn) + 1
+					stat.stage = 0
 					stat.save()
 					return JsonResponse({"status":"200", "data":{"description":"Success"}})
-
 	else:
 		return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
 
@@ -770,6 +970,9 @@ def get_selling_price(request):
 	else:
 		return JsonResponse({"status":"100", "data":{"description":"Failed! Wrong type of request"}})
 
+
+
+
 '''
 FRONT END TEST FUNCTIONS
 1. mapp
@@ -783,7 +986,10 @@ def mapp(request):
 def testmap(request):
 	return render(request, "map_test.html")
 
+@decorator_from_middleware(middleware.loggedIn)
 def testhome(request):
 	id = request.session["user_id"]
 	user = users.objects.get(pid = id)
 	return render(request, "index.html",{ "name" : user.name })
+def instructions(request):
+	return render(request,"instructions.html")
